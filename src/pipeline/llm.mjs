@@ -2,7 +2,7 @@
 //
 // Anthropic / OpenAI / Grok(xAI) / Gemini 중 API 키가 설정된 프로바이더를 자동 선택한다.
 // 각 프로바이더의 "최상위이면서 빠른" 모델을 기본값으로 쓰되 env로 override 가능:
-//   Anthropic  claude-sonnet-5     (ANTHROPIC_MODEL): Opus 4.8도 사용 가능
+//   Anthropic  claude-sonnet-5-5   (ANTHROPIC_MODEL): 2026-10-06부터. 그 전 콘텐츠는 claude-sonnet-5로 생성됨
 //   OpenAI     gpt-5.5             (OPENAI_MODEL)
 //   Grok(xAI)  grok-4.3           (XAI_MODEL)
 //   Gemini     gemini-3.5-flash   (GEMINI_MODEL)
@@ -10,23 +10,42 @@
 // 키가 여럿이면 LLM_PROVIDER로 명시하거나, 없으면 PRIORITY 순서로 첫 키를 쓴다.
 // 모델 ID는 릴리스 시점에 따라 달라질 수 있으므로 위 env로 정정할 수 있게 열어 둔다.
 
+// Anthropic 사고(thinking) 강도. 번역·요약·초안·이진 분류는 깊은 추론이 필요 없는 작업이라
+// 권장 시작점인 low를 쓴다(Sonnet 5.5는 effort 단계가 Sonnet 5와 다르게 재보정됐다).
+// 생략하면 high라 짧은 요청에도 매번 사고 토큰이 붙는다. Haiku 4.5처럼 effort를 받지 않는
+// 모델로 바꾸면 이 줄을 빼야 한다.
+const ANTHROPIC_EFFORT = 'low';
+
+// 안전 분류기가 거절(stop_reason=refusal)하면 서버가 다른 모델로 다시 돌린다.
+// Sonnet 5.5는 cyber·frontier_llm 분류 거절을 Sonnet 5로 넘긴다(AI 논문 초록이 걸릴 수 있다).
+// "default" 형식은 이 모델에서만 확인했으므로 다른 모델로 바꾸면 보내지 않는다.
+const FALLBACK_MODELS = new Set(['claude-sonnet-5-5']);
+
 // 각 프로바이더: 키 탐색 → 요청 조립(build) → 응답 텍스트 추출(extract).
 const PROVIDERS = {
   anthropic: {
     name: 'anthropic',
     keys: ['ANTHROPIC_API_KEY'],
     modelEnv: 'ANTHROPIC_MODEL',
-    defaultModel: 'claude-sonnet-5',
+    defaultModel: 'claude-sonnet-5-5',
     build({ apiKey, model, system, user, maxTokens, schema }) {
+      const fallback = FALLBACK_MODELS.has(model);
       return {
         url: 'https://api.anthropic.com/v1/messages',
-        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        headers: {
+          'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json',
+          ...(fallback && { 'anthropic-beta': 'server-side-fallback-2026-07-01' }),
+        },
         body: {
           model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }],
-          // 다른 프로바이더의 JSON 모드에 해당. 이게 없으면 긴 한국어 본문 속 따옴표를
-          // 이스케이프하지 않은 응답이 섞여 나와 10/5 백필에서 161건 중 28건이 파싱에 실패했다.
-          // (지원 모델: Sonnet 5 / 5.5, Opus 4.8 이상, Haiku 4.5 등)
-          ...(schema && { output_config: { format: { type: 'json_schema', schema } } }),
+          output_config: {
+            effort: ANTHROPIC_EFFORT,
+            // 다른 프로바이더의 JSON 모드에 해당. 이게 없으면 긴 한국어 본문 속 따옴표를
+            // 이스케이프하지 않은 응답이 섞여 나와 10/5 백필에서 161건 중 28건이 파싱에 실패했다.
+            // (지원 모델: Sonnet 5 / 5.5, Opus 4.8 이상, Haiku 4.5 등)
+            ...(schema && { format: { type: 'json_schema', schema } }),
+          },
+          ...(fallback && { fallbacks: 'default' }),
         },
       };
     },
@@ -180,6 +199,10 @@ export async function askLlmJSON({ system, user, maxTokens = 600, schema = null,
   if (p.refused?.(data)) {
     throw new Error(`[llm:${p.name}] 모델이 응답을 거부했습니다(${data.stop_details?.category ?? '분류 없음'}).`);
   }
+  // 거절당해 대체 모델이 응답한 경우. 어떤 글이 다른 모델로 만들어졌는지 로그로 남긴다.
+  if (typeof data.model === 'string' && !data.model.startsWith(model)) {
+    console.warn(`[llm:${p.name}] ${model}이 거절해 ${data.model}이 대신 응답했습니다.`);
+  }
   const text = p.extract(data);
   try {
     return parseLooseJson(text);
@@ -238,7 +261,8 @@ export function makeLlmPairClassifier({ fetchImpl = fetch } = {}) {
   return async (a, b) => {
     const result = await askLlmJSON({
       fetchImpl,
-      maxTokens: 100,
+      // 답은 한 단어지만 사고 토큰도 max_tokens에 포함된다. 100이면 사고만으로 잘릴 수 있다.
+      maxTokens: 1000,
       schema: objectSchema({ duplicate: 'boolean' }),
       system: '두 기사가 같은 소식(같은 사건/발표/논문)을 다루는지 판정한다. '
         + '언어가 달라도 내용이 같으면 같은 소식이다. 출력은 JSON만: {"duplicate": true|false}',

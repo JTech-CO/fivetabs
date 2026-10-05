@@ -99,9 +99,10 @@ async function generateFromFull(item, fullText, { fetchImpl }) {
   const ask = (label, maxTokens, system, schema) => askLlmJSON({ fetchImpl, maxTokens, system, user, schema })
     .catch(err => { errors.push(`${label}: ${err.message}`); return {}; });
 
-  // 본문 상한 12000자(extract.mjs)의 한국어 번역은 8000토큰 근처까지 간다. 여유를 둔다.
-  const t = await ask('번역', 12000, SYS_TRANSLATE_FULL, SCHEMA_TRANSLATION);
-  const sb = await ask('요약·블로그', 6000, SYS_SUMMARY_BLOG_FULL, SCHEMA_SUMMARY_BLOG);
+  // 본문 상한 12000자(extract.mjs)의 한국어 번역은 8000토큰 근처까지 간다. 사고 토큰도
+  // 상한에 포함되므로 여유를 둔다(실제 과금은 쓴 만큼이다).
+  const t = await ask('번역', 16000, SYS_TRANSLATE_FULL, SCHEMA_TRANSLATION);
+  const sb = await ask('요약·블로그', 8000, SYS_SUMMARY_BLOG_FULL, SCHEMA_SUMMARY_BLOG);
   const out = { translation: str(t.translation), summary: str(sb.summary), blog: str(sb.blog), usedFullText: true };
   return errors.length ? { ...out, detailError: errors.join(' / ') } : out;
 }
@@ -111,7 +112,7 @@ async function generateFromShort(item, system, { fetchImpl, usedFullText }) {
   const user = `출처: ${item.source}\n제목: ${item.title}\n요약: ${item.summary ?? '(요약 없음)'}`;
   try {
     // 번역본+요약+블로그 초안을 한 번에 받으므로 상한이 크다(2000에서 상시 잘렸다)
-    const out = await askLlmJSON({ fetchImpl, maxTokens: 6000, system, user, schema: SCHEMA_ALL });
+    const out = await askLlmJSON({ fetchImpl, maxTokens: 8000, system, user, schema: SCHEMA_ALL });
     return { translation: str(out.translation), summary: str(out.summary), blog: str(out.blog), usedFullText };
   } catch (err) {
     return nulls({ usedFullText, detailError: err.message });

@@ -53,8 +53,8 @@ export async function translateItem(item, { fetchImpl = fetch, forceRefine } = {
       system: refineOnly ? REFINE_SYSTEM : TRANSLATE_SYSTEM,
       user,
       // 초록 전문을 한국어로 옮기므로 넉넉히. arXiv 초록(~1.8k자)이 600에서 잘려
-      // 조용히 원문 폴백되던 문제가 있었다.
-      maxTokens: 2000,
+      // 조용히 원문 폴백되던 문제가 있었다. 사고 토큰도 상한에 포함되므로 여유를 둔다.
+      maxTokens: 4000,
       schema: objectSchema({ title_ko: 'string', summary_ko: 'string?' }),
     });
     const titleKo = typeof out.title_ko === 'string' && out.title_ko.trim() ? out.title_ko.trim() : item.title;

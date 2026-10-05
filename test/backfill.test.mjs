@@ -187,3 +187,34 @@ test('백필: 일시 오류(429)는 멈추지 않고 다음 행으로 넘어간�
     rmSync(dir, { recursive: true, force: true });
   }
 }));
+
+test('백필: 이미 있는 번역·상세는 다시 만들거나 덮어쓰지 않고 빈 칸만 채운다', withKey(async () => {
+  // 모델을 Sonnet 5 -> 5.5로 바꿔도(10/6) 앞서 만든 글은 그대로 둔다
+  const dir = mkdtempSync(join(tmpdir(), 'fivetabs-backfill-'));
+  const dbPath = join(dir, 'test.db');
+  const realFetch = globalThis.fetch;
+  let llmCalls = 0;
+  try {
+    const db = openDb(dbPath);
+    savePicks(db, { pickDate: '2026-08-01', items: [item({
+      source: 'arxiv', sourceItemId: 'a1', titleKo: '기존 제목', isTranslated: true,
+      detailTranslation: null, detailSummary: '기존 요약', detailBlog: '기존 초안',
+    })] });
+    db.close();
+    globalThis.fetch = async () => {
+      llmCalls++;
+      const out = { title_ko: '새 제목', summary_ko: '새', translation: '새 번역본', summary: '새 요약', blog: '새 초안' };
+      return { ok: true, status: 200, async json() { return { content: [{ type: 'text', text: JSON.stringify(out) }] }; } };
+    };
+    await runBackfill({ limit: 10, dbPath });
+
+    const check = openDb(dbPath);
+    const row = check.prepare('SELECT title_ko t, detail_translation dt, detail_summary ds, detail_blog db FROM daily_picks').get();
+    check.close();
+    assert.equal(llmCalls, 1);   // 번역은 건너뛰고 상세 1콜만
+    assert.deepEqual({ ...row }, { t: '기존 제목', dt: '새 번역본', ds: '기존 요약', db: '기존 초안' });
+  } finally {
+    globalThis.fetch = realFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}));

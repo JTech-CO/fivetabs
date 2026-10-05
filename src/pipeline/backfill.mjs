@@ -72,31 +72,35 @@ export async function runBackfill(opts) {
     for (const [i, row] of targets.entries()) {
       const item = toCandidate(row);
       const label = `${row.pick_date} ${row.source}`;
+      // 이미 있는 결과는 다시 만들지 않는다(재과금 방지 + 앞서 만든 글 보존).
+      // GeekNews는 원래 한국어라 제목 번역 대상이 아니다(정제만 하고 is_translated=0).
+      const needsTranslation = row.is_translated === 0 && row.source !== 'geeknews';
+      const needsDetail = !(row.has_detail_translation && row.has_detail_summary && row.has_detail_blog);
       try {
-        const t = await translateItem(item);
-        const d = await generateDetail(item);
+        const t = needsTranslation ? await translateItem(item) : {};
+        const d = needsDetail ? await generateDetail(item) : {};
         const fatal = [t.translateError, d.detailError].find(e => FATAL_LLM_ERROR.test(e ?? ''));
         if (fatal) {
           // 이 행은 기록하지 않는다(backfilled_at이 비어 다음 실행에서 그대로 대상이 된다)
           console.error(`[backfill] LLM을 쓸 수 없어 중단합니다(${i}/${targets.length}건 처리): ${fatal}`);
           return { total: targets.length, translated, detailed, skipped, aborted: true };
         }
-        const gotTranslation = t.titleKo && t.titleKo !== item.title;
+        const gotTranslation = t.isTranslated === true;
         const gotDetail = Boolean(d.summary || d.translation || d.blog);
         if (gotTranslation) translated++;
         if (gotDetail) detailed++;
         if (!gotTranslation && !gotDetail) skipped++;
 
         updateItemContent(db, row.id, {
-          titleKo: t.titleKo,
-          summaryKo: t.summaryKo,
-          isTranslated: t.isTranslated,
+          // 번역이 실패하면 아무것도 넘기지 않는다(원문 폴백 제목이 기존 번역을 덮지 않도록)
+          ...(gotTranslation && { titleKo: t.titleKo, summaryKo: t.summaryKo, isTranslated: true }),
           detailTranslation: d.translation,
           detailSummary: d.summary,
           detailBlog: d.blog,
         });
         console.log(`  [${i + 1}/${targets.length}] ${label}: `
-          + `번역 ${gotTranslation ? 'O' : '-'} / 상세 ${gotDetail ? 'O' : '-'}`
+          + `번역 ${!needsTranslation ? '유지' : gotTranslation ? 'O' : '-'}`
+          + ` / 상세 ${!needsDetail ? '유지' : gotDetail ? 'O' : '-'}`
           + `${d.usedFullText ? ' (전문)' : ''}`);
         // 두 함수는 실패해도 throw하지 않고 원문 폴백한다. 사유를 찍지 않으면
         // CI 로그에 '-'만 남아 왜 비었는지 알 수 없다.

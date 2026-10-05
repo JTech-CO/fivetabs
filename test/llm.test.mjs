@@ -31,8 +31,8 @@ test('키 없음: hasLlm false, activeProviderInfo null', withEnv({}, () => {
   assert.equal(activeProviderInfo(), null);
 }));
 
-test('anthropic 키만: sonnet-5 기본 모델', withEnv({ ANTHROPIC_API_KEY: 'k' }, () => {
-  assert.deepEqual(activeProviderInfo(), { name: 'anthropic', model: 'claude-sonnet-5' });
+test('anthropic 키만: sonnet-5-5 기본 모델', withEnv({ ANTHROPIC_API_KEY: 'k' }, () => {
+  assert.deepEqual(activeProviderInfo(), { name: 'anthropic', model: 'claude-sonnet-5-5' });
 }));
 
 test('openai 키만: gpt-5.5 기본 모델', withEnv({ OPENAI_API_KEY: 'k' }, () => {
@@ -73,7 +73,7 @@ test('anthropic 요청: /v1/messages, x-api-key, system 분리', withEnv({ ANTHR
   assert.equal(calls[0].headers['x-api-key'], 'sk-a');
   assert.equal(calls[0].body.system, 'SYS');
   assert.equal(calls[0].body.messages[0].content, 'USR');
-  assert.equal(calls[0].body.model, 'claude-sonnet-5');
+  assert.equal(calls[0].body.model, 'claude-sonnet-5-5');
 }));
 
 test('openai 요청: chat/completions, Bearer, system+user 메시지, json 모드', withEnv({ OPENAI_API_KEY: 'sk-o' }, async () => {
@@ -223,13 +223,13 @@ test('anthropic: schema를 주면 output_config.format(json_schema)으로 보낸
   const { impl, calls } = captureFetch(shape.anthropic);
   const schema = objectSchema({ title_ko: 'string', summary_ko: 'string?' });
   await askLlmJSON({ system: 'SYS', user: 'USR', schema, fetchImpl: impl });
-  assert.deepEqual(calls[0].body.output_config, { format: { type: 'json_schema', schema } });
+  assert.deepEqual(calls[0].body.output_config.format, { type: 'json_schema', schema });
 }));
 
-test('anthropic: schema가 없으면 output_config를 보내지 않는다', withKey(async () => {
+test('anthropic: schema가 없으면 format을 보내지 않는다', withKey(async () => {
   const { impl, calls } = captureFetch(shape.anthropic);
   await askLlmJSON({ system: 'SYS', user: 'USR', fetchImpl: impl });
-  assert.equal('output_config' in calls[0].body, false);
+  assert.equal('format' in calls[0].body.output_config, false);
 }));
 
 test('openai: schema는 무시하고 기존 json 모드 그대로', withEnv({ OPENAI_API_KEY: 'k' }, async () => {
@@ -237,4 +237,33 @@ test('openai: schema는 무시하고 기존 json 모드 그대로', withEnv({ OP
   await askLlmJSON({ system: 'SYS', user: 'USR', schema: objectSchema({ a: 'string' }), fetchImpl: impl });
   assert.equal('output_config' in calls[0].body, false);
   assert.equal(calls[0].body.response_format.type, 'json_object');
+}));
+
+// ── Sonnet 5.5 전환(2026-10-06) ──────────────────────────────
+
+test('anthropic 기본: effort low, 거절 시 서버 측 대체 모델(fallbacks default + beta 헤더)', withKey(async () => {
+  const { impl, calls } = captureFetch(shape.anthropic);
+  await askLlmJSON({ system: 'SYS', user: 'USR', fetchImpl: impl });
+  assert.equal(calls[0].body.output_config.effort, 'low');
+  assert.equal(calls[0].body.fallbacks, 'default');
+  assert.equal(calls[0].headers['anthropic-beta'], 'server-side-fallback-2026-07-01');
+  assert.equal('thinking' in calls[0].body, false);   // disabled는 Sonnet 5.5에서 400
+}));
+
+test('anthropic 모델을 바꾸면 fallbacks·beta 헤더를 보내지 않는다', withEnv({ ANTHROPIC_API_KEY: 'k', ANTHROPIC_MODEL: 'claude-opus-4-8' }, async () => {
+  const { impl, calls } = captureFetch(shape.anthropic);
+  await askLlmJSON({ system: 'SYS', user: 'USR', fetchImpl: impl });
+  assert.equal('fallbacks' in calls[0].body, false);
+  assert.equal('anthropic-beta' in calls[0].headers, false);
+}));
+
+test('대체 모델이 응답하면 경고를 남기고 결과는 그대로 쓴다', withKey(async () => {
+  const served = { model: 'claude-sonnet-5', stop_reason: 'end_turn', content: [{ type: 'text', text: '{"a":"b"}' }] };
+  const warned = [];
+  const orig = console.warn;
+  console.warn = msg => warned.push(msg);
+  try {
+    assert.deepEqual(await askLlmJSON({ system: 's', user: 'u', fetchImpl: resOf(served) }), { a: 'b' });
+  } finally { console.warn = orig; }
+  assert.match(warned.join(' '), /claude-sonnet-5-5이 거절해 claude-sonnet-5이 대신 응답/);
 }));

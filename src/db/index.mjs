@@ -155,7 +155,9 @@ export function getBackfillTargets(db, { date = null, source = null, limit = 50 
   if (date) { where.push('pick_date = ?'); params.push(date); }
   if (source) { where.push('source = ?'); params.push(source); }
   return db.prepare(
-    `SELECT id, pick_date, source, source_item_id, title_original, summary_original, url, published_at
+    `SELECT id, pick_date, source, source_item_id, title_original, summary_original, url, published_at,
+       is_translated, detail_translation IS NOT NULL AS has_detail_translation,
+       detail_summary IS NOT NULL AS has_detail_summary, detail_blog IS NOT NULL AS has_detail_blog
      FROM daily_picks WHERE ${where.join(' AND ')} ORDER BY pick_date DESC, rank ASC LIMIT ?`,
   ).all(...params, limit);
 }
@@ -163,6 +165,10 @@ export function getBackfillTargets(db, { date = null, source = null, limit = 50 
 /**
  * 백필 결과를 해당 행에만 반영한다.
  * savePicks는 그날 행을 전부 지우고 다시 넣으므로 행 단위 갱신에 쓰면 안 된다.
+ *
+ * 상세 3구성은 빈 칸만 채우고 이미 있는 값은 덮어쓰지 않는다. 일부만 찬 행을 다시 돌려도
+ * 앞서 만든 글(10/6 이전은 claude-sonnet-5)이 그대로 남는다. 번역(title_ko 등)은
+ * 넘긴 값만 반영하므로, 호출부는 번역에 성공했을 때만 넘긴다.
  */
 export function updateItemContent(db, id, {
   titleKo, summaryKo, isTranslated, detailTranslation, detailSummary, detailBlog,
@@ -171,14 +177,14 @@ export function updateItemContent(db, id, {
     UPDATE daily_picks SET
       title_ko = COALESCE(?, title_ko),
       summary_ko = COALESCE(?, summary_ko),
-      is_translated = ?,
-      detail_translation = COALESCE(?, detail_translation),
-      detail_summary = COALESCE(?, detail_summary),
-      detail_blog = COALESCE(?, detail_blog),
+      is_translated = COALESCE(?, is_translated),
+      detail_translation = COALESCE(detail_translation, ?),
+      detail_summary = COALESCE(detail_summary, ?),
+      detail_blog = COALESCE(detail_blog, ?),
       backfilled_at = datetime('now')
     WHERE id = ?
   `).run(
-    titleKo ?? null, summaryKo ?? null, isTranslated ? 1 : 0,
+    titleKo ?? null, summaryKo ?? null, isTranslated === undefined ? null : Number(Boolean(isTranslated)),
     detailTranslation ?? null, detailSummary ?? null, detailBlog ?? null, id,
   );
 }
