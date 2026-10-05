@@ -139,12 +139,18 @@ export function savePicks(db, { pickDate, items, dedupLog = [] }) {
   return { inserted, updated, removed, dedupRows: dedupLog.length };
 }
 
+// 한국어 콘텐츠가 덜 채워진 행: 상세 3구성 중 하나라도 비었거나, 번역 대상인데 번역이 안 됐다.
+// GeekNews는 이미 한국어라 정제만 하고 is_translated=0으로 남으므로(§0) 번역 조건에서 뺀다.
+// (예전엔 is_translated=0만 봐서 다 채워진 GeekNews 행까지 매번 다시 과금했다)
+const INCOMPLETE = `(detail_translation IS NULL OR detail_summary IS NULL OR detail_blog IS NULL
+  OR (is_translated = 0 AND source <> 'geeknews'))`;
+
 /**
- * 백필 대상 행을 반환한다. 번역이 안 됐거나 상세가 비어 있고, 아직 백필하지 않은 항목.
+ * 백필 대상 행을 반환한다. 한국어 콘텐츠가 덜 채워졌고, 아직 백필하지 않은 항목.
  * @param {object} [filter] { date, source, limit }
  */
 export function getBackfillTargets(db, { date = null, source = null, limit = 50 } = {}) {
-  const where = ['backfilled_at IS NULL', "(is_translated = 0 OR detail_summary IS NULL)"];
+  const where = ['backfilled_at IS NULL', INCOMPLETE];
   const params = [];
   if (date) { where.push('pick_date = ?'); params.push(date); }
   if (source) { where.push('source = ?'); params.push(source); }
@@ -178,19 +184,18 @@ export function updateItemContent(db, id, {
 }
 
 /**
- * 아무것도 생성되지 않은 채 처리 완료로 표시된 행의 backfilled_at을 지운다.
+ * 덜 채워진 채 처리 완료로 표시된 행의 backfilled_at을 지운다.
  *
  * 백필은 LLM이 실패해도 throw하지 않고 원문 폴백하는데, 그 경우에도 backfilled_at이
  * 찍혀 다음 실행에서 영영 건너뛴다. 응답 잘림·rate limit 같은 일시적 실패까지
- * 영구 포기가 되므로, 결과가 빈 행만 골라 다시 대상으로 돌린다.
+ * 영구 포기가 되므로, 결과가 비었거나 일부만 나온 행을 골라 다시 대상으로 돌린다.
+ * (재실행 시 기존 값은 COALESCE로 보존되고, 새로 나온 값만 채워진다)
  * @returns {number} 되돌린 행 수
  */
-export function resetEmptyBackfills(db) {
-  const { changes } = db.prepare(`
-    UPDATE daily_picks SET backfilled_at = NULL
-    WHERE backfilled_at IS NOT NULL
-      AND detail_translation IS NULL AND detail_summary IS NULL AND detail_blog IS NULL
-  `).run();
+export function resetIncompleteBackfills(db) {
+  const { changes } = db.prepare(
+    `UPDATE daily_picks SET backfilled_at = NULL WHERE backfilled_at IS NOT NULL AND ${INCOMPLETE}`,
+  ).run();
   return Number(changes);
 }
 

@@ -18,7 +18,7 @@ on:
         type: boolean
         default: false
       retry_empty:
-        description: '이전에 아무것도 생성되지 않은 행을 다시 대상으로'
+        description: '이전에 결과가 비었거나 일부만 생성된 행을 다시 대상으로'
         type: boolean
         default: false
 

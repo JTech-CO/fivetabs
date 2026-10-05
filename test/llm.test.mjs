@@ -1,7 +1,7 @@
 // 멀티 프로바이더 LLM 클라이언트 검증 (Anthropic/OpenAI/Grok/Gemini)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { askLlmJSON, hasLlm, activeProviderInfo, parseLooseJson } from '../src/pipeline/llm.mjs';
+import { askLlmJSON, hasLlm, activeProviderInfo, parseLooseJson, objectSchema } from '../src/pipeline/llm.mjs';
 import { withEnv, withKey } from './helpers.mjs';
 
 // 요청을 가로채 URL/헤더/바디를 기록하고, 고정 응답을 돌려주는 mock
@@ -147,6 +147,14 @@ test('잘림: 정상 종료는 그대로 파싱', withKey(async () => {
   assert.deepEqual(await askLlmJSON({ system: 's', user: 'u', fetchImpl: resOf(ok) }), { title_ko: '제목' });
 }));
 
+test('거부: anthropic stop_reason=refusal은 파싱 실패가 아니라 거부로 보고', withKey(async () => {
+  const refused = { stop_reason: 'refusal', stop_details: { category: 'cyber' }, content: [] };
+  await assert.rejects(
+    () => askLlmJSON({ system: 's', user: 'u', fetchImpl: resOf(refused) }),
+    /응답을 거부했습니다\(cyber\)/,
+  );
+}));
+
 test('잘림: openai finish_reason=length도 감지', withEnv({ OPENAI_API_KEY: 'k' }, async () => {
   const truncated = { choices: [{ finish_reason: 'length', message: { content: '{"a":' } }] };
   await assert.rejects(
@@ -197,4 +205,36 @@ test('파싱 실패 메시지는 꼬리도 남긴다(깨진 곳은 대개 뒤쪽
     () => askLlmJSON({ system: 's', user: 'u', fetchImpl: resOf(bad) }),
     /생략/,
   );
+}));
+
+// ── 스키마 강제 출력 ──────────────────────────────────────────
+// 회귀: 긴 한국어 본문 속 따옴표를 이스케이프하지 않은 응답이 섞여 161건 중 28건이 파싱 실패
+
+test('objectSchema: 전 필드 required, additionalProperties false, string?는 null 허용', () => {
+  const s = objectSchema({ a: 'string', b: 'string?', c: 'boolean' });
+  assert.deepEqual(s.required, ['a', 'b', 'c']);
+  assert.equal(s.additionalProperties, false);
+  assert.deepEqual(s.properties.a, { type: 'string' });
+  assert.deepEqual(s.properties.b, { anyOf: [{ type: 'string' }, { type: 'null' }] });
+  assert.deepEqual(s.properties.c, { type: 'boolean' });
+});
+
+test('anthropic: schema를 주면 output_config.format(json_schema)으로 보낸다', withKey(async () => {
+  const { impl, calls } = captureFetch(shape.anthropic);
+  const schema = objectSchema({ title_ko: 'string', summary_ko: 'string?' });
+  await askLlmJSON({ system: 'SYS', user: 'USR', schema, fetchImpl: impl });
+  assert.deepEqual(calls[0].body.output_config, { format: { type: 'json_schema', schema } });
+}));
+
+test('anthropic: schema가 없으면 output_config를 보내지 않는다', withKey(async () => {
+  const { impl, calls } = captureFetch(shape.anthropic);
+  await askLlmJSON({ system: 'SYS', user: 'USR', fetchImpl: impl });
+  assert.equal('output_config' in calls[0].body, false);
+}));
+
+test('openai: schema는 무시하고 기존 json 모드 그대로', withEnv({ OPENAI_API_KEY: 'k' }, async () => {
+  const { impl, calls } = captureFetch(shape.openai);
+  await askLlmJSON({ system: 'SYS', user: 'USR', schema: objectSchema({ a: 'string' }), fetchImpl: impl });
+  assert.equal('output_config' in calls[0].body, false);
+  assert.equal(calls[0].body.response_format.type, 'json_object');
 }));

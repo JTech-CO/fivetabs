@@ -11,7 +11,7 @@
 
 import { fetchText } from '../adapters/http.mjs';
 import { extractArticleText } from './extract.mjs';
-import { askLlmJSON, hasLlm } from './llm.mjs';
+import { askLlmJSON, hasLlm, objectSchema } from './llm.mjs';
 
 const FULLTEXT_SOURCES = new Set(['hackernews', 'physorg', 'techxplore']);
 const MIN_FULLTEXT_CHARS = 400; // 이보다 짧으면 추출 실패로 보고 초록 폴백
@@ -51,6 +51,10 @@ const SYS_REFINE =
   '너는 한국어 기술 콘텐츠 에디터다. 입력은 이미 한국어인 기술 뉴스의 제목과 요약이다. '
   + 'translation(원문을 맞춤법·표기만 정제), summary(핵심 3~6문장), blog(기술 블로그 초안)을 생성하라. '
   + '출력은 JSON만: {"translation":"...","summary":"...","blog":"..."}';
+
+const SCHEMA_TRANSLATION = objectSchema({ translation: 'string' });
+const SCHEMA_SUMMARY_BLOG = objectSchema({ summary: 'string', blog: 'string' });
+const SCHEMA_ALL = objectSchema({ translation: 'string', summary: 'string', blog: 'string' });
 
 const str = v => (typeof v === 'string' && v.trim() ? v.trim() : null);
 const nulls = extra => ({ translation: null, summary: null, blog: null, ...extra });
@@ -92,12 +96,12 @@ export async function generateDetail(item, { fetchImpl = fetch, forceRefine } = 
 async function generateFromFull(item, fullText, { fetchImpl }) {
   const user = `제목: ${item.title}\n본문:\n${fullText}`;
   const errors = [];
-  const ask = (label, maxTokens, system) => askLlmJSON({ fetchImpl, maxTokens, system, user })
+  const ask = (label, maxTokens, system, schema) => askLlmJSON({ fetchImpl, maxTokens, system, user, schema })
     .catch(err => { errors.push(`${label}: ${err.message}`); return {}; });
 
   // 본문 상한 12000자(extract.mjs)의 한국어 번역은 8000토큰 근처까지 간다. 여유를 둔다.
-  const t = await ask('번역', 12000, SYS_TRANSLATE_FULL);
-  const sb = await ask('요약·블로그', 6000, SYS_SUMMARY_BLOG_FULL);
+  const t = await ask('번역', 12000, SYS_TRANSLATE_FULL, SCHEMA_TRANSLATION);
+  const sb = await ask('요약·블로그', 6000, SYS_SUMMARY_BLOG_FULL, SCHEMA_SUMMARY_BLOG);
   const out = { translation: str(t.translation), summary: str(sb.summary), blog: str(sb.blog), usedFullText: true };
   return errors.length ? { ...out, detailError: errors.join(' / ') } : out;
 }
@@ -107,7 +111,7 @@ async function generateFromShort(item, system, { fetchImpl, usedFullText }) {
   const user = `출처: ${item.source}\n제목: ${item.title}\n요약: ${item.summary ?? '(요약 없음)'}`;
   try {
     // 번역본+요약+블로그 초안을 한 번에 받으므로 상한이 크다(2000에서 상시 잘렸다)
-    const out = await askLlmJSON({ fetchImpl, maxTokens: 6000, system, user });
+    const out = await askLlmJSON({ fetchImpl, maxTokens: 6000, system, user, schema: SCHEMA_ALL });
     return { translation: str(out.translation), summary: str(out.summary), blog: str(out.blog), usedFullText };
   } catch (err) {
     return nulls({ usedFullText, detailError: err.message });

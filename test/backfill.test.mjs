@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, savePicks, getPicksByDate, getBackfillTargets, updateItemContent, resetEmptyBackfills } from '../src/db/index.mjs';
+import { openDb, savePicks, getPicksByDate, getBackfillTargets, updateItemContent, resetIncompleteBackfills } from '../src/db/index.mjs';
 import { runBackfill } from '../src/pipeline/backfill.mjs';
 import { withKey } from './helpers.mjs';
 
@@ -95,7 +95,9 @@ function seeded() {
   const rows = getBackfillTargets(db, { limit: 10 });
   const byKey = Object.fromEntries(rows.map(r => [r.source_item_id, r.id]));
   // 한 행은 생성 성공, 한 행은 LLM이 실패해 전부 null. 둘 다 backfilled_at은 찍힌다
-  updateItemContent(db, byKey.ok, { titleKo: '번역됨', isTranslated: true, detailSummary: '요약' });
+  updateItemContent(db, byKey.ok, {
+    titleKo: '번역됨', isTranslated: true, detailTranslation: '번역본', detailSummary: '요약', detailBlog: '초안',
+  });
   updateItemContent(db, byKey.empty, { isTranslated: false });
   return db;
 }
@@ -105,20 +107,44 @@ test('백필: 실패해도 backfilled_at이 찍혀 다음 실행에서 건너뛰
   assert.equal(getBackfillTargets(db, { limit: 10 }).length, 0);
 });
 
-test('백필: resetEmptyBackfills는 빈 행만 대상으로 되돌린다', () => {
+test('백필: resetIncompleteBackfills는 다 채워진 행은 건드리지 않는다', () => {
   // 회귀: 응답 잘림·rate limit 같은 일시 실패가 영구 포기가 되던 문제
   const db = seeded();
-  assert.equal(resetEmptyBackfills(db), 1);
+  assert.equal(resetIncompleteBackfills(db), 1);
   const again = getBackfillTargets(db, { limit: 10 });
   assert.equal(again.length, 1);
   assert.equal(again[0].source_item_id, 'empty');   // 성공한 행은 그대로
 });
 
+test('백필: 일부만 나온 행(번역본만 비었음)도 되돌린다', () => {
+  // 회귀: 전부 비어야만 되돌려서, 요약은 나왔지만 번역본이 잘린 15건이 영영 남았다
+  const db = seeded();
+  const okId = db.prepare("SELECT id FROM daily_picks WHERE source_item_id = 'ok'").get().id;
+  db.prepare('UPDATE daily_picks SET detail_translation = NULL WHERE id = ?').run(okId);
+  assert.equal(resetIncompleteBackfills(db), 2);
+  // 재실행에서 번역본만 새로 나와도 기존 요약·초안은 보존된다(COALESCE)
+  updateItemContent(db, okId, { isTranslated: true, detailTranslation: '새 번역본' });
+  const row = db.prepare('SELECT detail_translation t, detail_summary s, detail_blog b FROM daily_picks WHERE id = ?').get(okId);
+  assert.deepEqual({ ...row }, { t: '새 번역본', s: '요약', b: '초안' });
+});
+
+test('백필: 다 채워진 GeekNews 행은 is_translated=0이어도 대상이 아니다', () => {
+  // GeekNews는 정제만 하므로 is_translated가 늘 0. 그것만 보고 매번 다시 과금하던 문제
+  const db = openDb(':memory:');
+  savePicks(db, { pickDate: '2026-08-01', items: [item({
+    source: 'geeknews', sourceItemId: 'g1', isTranslated: false,
+    detailTranslation: '정제본', detailSummary: '요약', detailBlog: '초안',
+  })] });
+  assert.equal(getBackfillTargets(db, { limit: 10 }).length, 0);
+});
+
 test('백필: 되돌릴 것이 없으면 0을 반환(멱등)', () => {
   const db = seeded();
-  resetEmptyBackfills(db);
-  updateItemContent(db, getBackfillTargets(db, { limit: 10 })[0].id, { detailSummary: '이번엔 성공' });
-  assert.equal(resetEmptyBackfills(db), 0);
+  resetIncompleteBackfills(db);
+  updateItemContent(db, getBackfillTargets(db, { limit: 10 })[0].id, {
+    isTranslated: true, detailTranslation: '번역본', detailSummary: '이번엔 성공', detailBlog: '초안',
+  });
+  assert.equal(resetIncompleteBackfills(db), 0);
 });
 
 test('백필: 크레딧이 바닥나면 멈추고 남은 행을 빈 결과로 찍지 않는다', withKey(async () => {
@@ -138,6 +164,24 @@ test('백필: 크레딧이 바닥나면 멈추고 남은 행을 빈 결과로 �
     const db = openDb(dbPath);
     assert.equal(getBackfillTargets(db, { limit: 10 }).length, 3);   // 하나도 소모되지 않음
     db.close();
+  } finally {
+    globalThis.fetch = realFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('백필: 일시 오류(429)는 멈추지 않고 다음 행으로 넘어간다', withKey(async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fivetabs-backfill-'));
+  const dbPath = join(dir, 'test.db');
+  const realFetch = globalThis.fetch;
+  try {
+    seed(dbPath).close();
+    globalThis.fetch = async () => ({
+      ok: false, status: 429, statusText: 'Too Many Requests', async text() { return 'rate limited'; },
+    });
+    const result = await runBackfill({ limit: 10, dbPath });
+    assert.equal(result.aborted, undefined);
+    assert.equal(result.skipped, 3);
   } finally {
     globalThis.fetch = realFetch;
     rmSync(dir, { recursive: true, force: true });

@@ -11,7 +11,7 @@
 // 처리한 행은 backfilled_at이 찍혀 재실행해도 다시 과금되지 않는다.
 
 import { pathToFileURL } from 'node:url';
-import { openDb, getBackfillTargets, updateItemContent, resetEmptyBackfills } from '../db/index.mjs';
+import { openDb, getBackfillTargets, updateItemContent, resetIncompleteBackfills } from '../db/index.mjs';
 import { translateItem } from './translate.mjs';
 import { generateDetail } from './detail.mjs';
 import { hasLlm, activeProviderInfo } from './llm.mjs';
@@ -30,9 +30,10 @@ function parseArgs(argv) {
   return opts;
 }
 
-// 크레딧 소진·키 무효는 다음 행에서도 똑같이 실패한다. 계속 돌면 남은 행이 전부
-// "빈 결과"로 찍혀 버리므로(실측: 9/25 배치 2~4가 293건을 그렇게 소모) 거기서 멈춘다.
-const FATAL_LLM_ERROR = /credit balance is too low|insufficient_quota|API 오류 401/i;
+// 크레딧 소진(400)·키 무효(401/403)·요청 형식 오류(400)는 다음 행에서도 똑같이 실패한다.
+// 계속 돌면 남은 행이 전부 "빈 결과"로 찍혀 버리므로(실측: 9/25 배치 2~4가 293건을
+// 그렇게 소모) 거기서 멈춘다. 일시 오류(429·5xx)와 행별 파싱 실패는 계속 진행한다.
+const FATAL_LLM_ERROR = /API 오류 40[013]|insufficient_quota/;
 
 /** DB 행 → 파이프라인이 쓰는 Candidate 형태로 복원 */
 const toCandidate = row => ({
@@ -49,8 +50,8 @@ export async function runBackfill(opts) {
   const db = openDb(dbPath);
   try {
     if (retryEmpty && !dry) {
-      const reset = resetEmptyBackfills(db);
-      console.log(`[backfill] 결과가 빈 행 ${reset}건을 대상으로 되돌림`);
+      const reset = resetIncompleteBackfills(db);
+      console.log(`[backfill] 결과가 비었거나 일부만 나온 행 ${reset}건을 대상으로 되돌림`);
     }
     const targets = getBackfillTargets(db, { date, source, limit });
     const provider = activeProviderInfo();

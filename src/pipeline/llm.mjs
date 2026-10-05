@@ -17,15 +17,22 @@ const PROVIDERS = {
     keys: ['ANTHROPIC_API_KEY'],
     modelEnv: 'ANTHROPIC_MODEL',
     defaultModel: 'claude-sonnet-5',
-    build({ apiKey, model, system, user, maxTokens }) {
+    build({ apiKey, model, system, user, maxTokens, schema }) {
       return {
         url: 'https://api.anthropic.com/v1/messages',
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] },
+        body: {
+          model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }],
+          // 다른 프로바이더의 JSON 모드에 해당. 이게 없으면 긴 한국어 본문 속 따옴표를
+          // 이스케이프하지 않은 응답이 섞여 나와 10/5 백필에서 161건 중 28건이 파싱에 실패했다.
+          // (지원 모델: Sonnet 5 / 5.5, Opus 4.8 이상, Haiku 4.5 등)
+          ...(schema && { output_config: { format: { type: 'json_schema', schema } } }),
+        },
       };
     },
     extract: data => (data.content ?? []).filter(b => b.type === 'text').map(b => b.text).join(''),
     truncated: data => data.stop_reason === 'max_tokens',
+    refused: data => data.stop_reason === 'refusal',
   },
 
   openai: {
@@ -127,16 +134,36 @@ export function activeProviderInfo() {
 }
 
 /**
+ * 문자열(또는 불리언) 필드만 있는 평평한 객체의 JSON 스키마.
+ * 필드 타입: 'string' | 'string?'(null 허용) | 'boolean'
+ * @param {Record<string, 'string'|'string?'|'boolean'>} fields
+ */
+export function objectSchema(fields) {
+  const TYPES = {
+    string: { type: 'string' },
+    'string?': { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    boolean: { type: 'boolean' },
+  };
+  return {
+    type: 'object',
+    properties: Object.fromEntries(Object.entries(fields).map(([k, t]) => [k, TYPES[t]])),
+    required: Object.keys(fields),
+    additionalProperties: false,
+  };
+}
+
+/**
  * 활성 프로바이더로 system+user 프롬프트를 보내 JSON 응답을 파싱해 반환한다.
  * 프로바이더별 응답 형태 차이를 extract()로 흡수하고, 코드펜스 감싸기까지 처리한다.
+ * schema를 주면 Anthropic은 그 스키마로 출력을 강제한다(나머지는 각자의 JSON 모드).
  */
-export async function askLlmJSON({ system, user, maxTokens = 600, fetchImpl = fetch }) {
+export async function askLlmJSON({ system, user, maxTokens = 600, schema = null, fetchImpl = fetch }) {
   const p = activeProvider();
   if (!p) throw new Error('[llm] 사용 가능한 API 키가 없음 (ANTHROPIC/OPENAI/XAI/GEMINI)');
 
   const apiKey = keyFor(p);
   const model = process.env[p.modelEnv] || p.defaultModel;
-  const { url, headers, body } = p.build({ apiKey, model, system, user, maxTokens });
+  const { url, headers, body } = p.build({ apiKey, model, system, user, maxTokens, schema });
 
   const res = await fetchImpl(url, { method: 'POST', headers, body: JSON.stringify(body) });
   if (!res.ok) {
@@ -149,6 +176,9 @@ export async function askLlmJSON({ system, user, maxTokens = 600, fetchImpl = fe
   // 뭉뚱그리면 상한이 모자란 건지 모델이 헛소리를 한 건지 구분할 수 없어, 따로 보고한다.
   if (p.truncated?.(data)) {
     throw new Error(`[llm:${p.name}] 응답이 maxTokens(${maxTokens})에서 잘렸습니다. 상한을 올리세요.`);
+  }
+  if (p.refused?.(data)) {
+    throw new Error(`[llm:${p.name}] 모델이 응답을 거부했습니다(${data.stop_details?.category ?? '분류 없음'}).`);
   }
   const text = p.extract(data);
   try {
@@ -209,6 +239,7 @@ export function makeLlmPairClassifier({ fetchImpl = fetch } = {}) {
     const result = await askLlmJSON({
       fetchImpl,
       maxTokens: 100,
+      schema: objectSchema({ duplicate: 'boolean' }),
       system: '두 기사가 같은 소식(같은 사건/발표/논문)을 다루는지 판정한다. '
         + '언어가 달라도 내용이 같으면 같은 소식이다. 출력은 JSON만: {"duplicate": true|false}',
       user: `A: [${a.source}] ${a.title}\n${a.summary?.slice(0, 300) ?? ''}\n\n`
