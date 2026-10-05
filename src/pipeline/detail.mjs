@@ -86,15 +86,20 @@ export async function generateDetail(item, { fetchImpl = fetch, forceRefine } = 
 }
 
 // 전문: 번역(길어서 별도 콜, 큰 토큰) + 요약·블로그(1콜)
+//
+// 두 콜은 따로 실패를 받는다. 긴 기사는 번역만 상한에서 잘리는 일이 잦은데, 한 try로
+// 묶으면 멀쩡히 나온 요약·블로그까지 같이 버려진다.
 async function generateFromFull(item, fullText, { fetchImpl }) {
   const user = `제목: ${item.title}\n본문:\n${fullText}`;
-  try {
-    const t = await askLlmJSON({ fetchImpl, maxTokens: 8000, system: SYS_TRANSLATE_FULL, user });
-    const sb = await askLlmJSON({ fetchImpl, maxTokens: 6000, system: SYS_SUMMARY_BLOG_FULL, user });
-    return { translation: str(t.translation), summary: str(sb.summary), blog: str(sb.blog), usedFullText: true };
-  } catch (err) {
-    return nulls({ usedFullText: true, detailError: err.message });
-  }
+  const errors = [];
+  const ask = (label, maxTokens, system) => askLlmJSON({ fetchImpl, maxTokens, system, user })
+    .catch(err => { errors.push(`${label}: ${err.message}`); return {}; });
+
+  // 본문 상한 12000자(extract.mjs)의 한국어 번역은 8000토큰 근처까지 간다. 여유를 둔다.
+  const t = await ask('번역', 12000, SYS_TRANSLATE_FULL);
+  const sb = await ask('요약·블로그', 6000, SYS_SUMMARY_BLOG_FULL);
+  const out = { translation: str(t.translation), summary: str(sb.summary), blog: str(sb.blog), usedFullText: true };
+  return errors.length ? { ...out, detailError: errors.join(' / ') } : out;
 }
 
 // 초록/정제: 3구성 1콜
@@ -118,9 +123,11 @@ export async function generateDetailsAll(items, options = {}) {
   let generated = 0, failed = 0, fullText = 0;
   for (const item of items) {
     const d = await generateDetail(item, options);
-    if (d.detailError) failed++;
-    else if (d.translation || d.summary || d.blog) generated++;
+    // 일부만 나온 경우(번역만 잘림 등)도 화면에 쓸 내용이 있으니 생성으로 센다
+    if (d.translation || d.summary || d.blog) generated++;
+    else if (d.detailError) failed++;
     if (d.usedFullText && !d.detailError) fullText++;
+    if (d.detailError) console.warn(`  [detail] ${item.source}: ${d.detailError}`);
     out.push({ ...item, detailTranslation: d.translation, detailSummary: d.summary, detailBlog: d.blog });
   }
   return { items: out, stats: { total: items.length, generated, fullText, failed } };

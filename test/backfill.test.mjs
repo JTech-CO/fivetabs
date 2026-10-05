@@ -1,7 +1,12 @@
 // 과거 항목 백필 검증
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openDb, savePicks, getPicksByDate, getBackfillTargets, updateItemContent, resetEmptyBackfills } from '../src/db/index.mjs';
+import { runBackfill } from '../src/pipeline/backfill.mjs';
+import { withKey } from './helpers.mjs';
 
 const item = (over = {}) => ({
   source: 'hackernews', sourceItemId: 'h1', title: 'English Title', titleKo: 'English Title',
@@ -10,8 +15,8 @@ const item = (over = {}) => ({
   selectionReason: 'primary', isTranslated: false, ...over,
 });
 
-function seed() {
-  const db = openDb(':memory:');
+function seed(path = ':memory:') {
+  const db = openDb(path);
   savePicks(db, {
     pickDate: '2026-08-01',
     items: [item(), item({ source: 'arxiv', sourceItemId: 'a1', title: 'Paper' })],
@@ -115,3 +120,26 @@ test('백필: 되돌릴 것이 없으면 0을 반환(멱등)', () => {
   updateItemContent(db, getBackfillTargets(db, { limit: 10 })[0].id, { detailSummary: '이번엔 성공' });
   assert.equal(resetEmptyBackfills(db), 0);
 });
+
+test('백필: 크레딧이 바닥나면 멈추고 남은 행을 빈 결과로 찍지 않는다', withKey(async () => {
+  // 회귀: 크레딧 소진 뒤에도 끝까지 돌며 남은 293건을 "빈 결과"로 소모했다
+  const dir = mkdtempSync(join(tmpdir(), 'fivetabs-backfill-'));
+  const dbPath = join(dir, 'test.db');
+  const realFetch = globalThis.fetch;
+  try {
+    seed(dbPath).close();
+    globalThis.fetch = async () => ({
+      ok: false, status: 400, statusText: 'Bad Request',
+      async text() { return '{"error":{"message":"Your credit balance is too low to access the Anthropic API."}}'; },
+    });
+    const result = await runBackfill({ limit: 10, dbPath });
+    assert.equal(result.aborted, true);
+
+    const db = openDb(dbPath);
+    assert.equal(getBackfillTargets(db, { limit: 10 }).length, 3);   // 하나도 소모되지 않음
+    db.close();
+  } finally {
+    globalThis.fetch = realFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}));

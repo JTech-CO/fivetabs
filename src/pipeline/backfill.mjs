@@ -30,6 +30,10 @@ function parseArgs(argv) {
   return opts;
 }
 
+// 크레딧 소진·키 무효는 다음 행에서도 똑같이 실패한다. 계속 돌면 남은 행이 전부
+// "빈 결과"로 찍혀 버리므로(실측: 9/25 배치 2~4가 293건을 그렇게 소모) 거기서 멈춘다.
+const FATAL_LLM_ERROR = /credit balance is too low|insufficient_quota|API 오류 401/i;
+
 /** DB 행 → 파이프라인이 쓰는 Candidate 형태로 복원 */
 const toCandidate = row => ({
   source: row.source,
@@ -70,6 +74,12 @@ export async function runBackfill(opts) {
       try {
         const t = await translateItem(item);
         const d = await generateDetail(item);
+        const fatal = [t.translateError, d.detailError].find(e => FATAL_LLM_ERROR.test(e ?? ''));
+        if (fatal) {
+          // 이 행은 기록하지 않는다(backfilled_at이 비어 다음 실행에서 그대로 대상이 된다)
+          console.error(`[backfill] LLM을 쓸 수 없어 중단합니다(${i}/${targets.length}건 처리): ${fatal}`);
+          return { total: targets.length, translated, detailed, skipped, aborted: true };
+        }
         const gotTranslation = t.titleKo && t.titleKo !== item.title;
         const gotDetail = Boolean(d.summary || d.translation || d.blog);
         if (gotTranslation) translated++;
@@ -106,5 +116,6 @@ export async function runBackfill(opts) {
 // CLI로 직접 실행될 때만 동작(테스트에서 import 가능하도록).
 // 경로에 한글·공백이 있으면 import.meta.url은 퍼센트 인코딩되므로 pathToFileURL로 맞춘다.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runBackfill(parseArgs(process.argv.slice(2)));
+  const result = await runBackfill(parseArgs(process.argv.slice(2)));
+  if (result.aborted) process.exitCode = 1;   // CI가 빨갛게 보이도록(커밋 스텝은 그래도 돈다)
 }

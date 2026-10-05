@@ -221,13 +221,21 @@ const hangs = (_url, { signal }) => new Promise((_, reject) => {
   signal.addEventListener('abort', () => reject(signal.reason));
 });
 
-test('fetchText: 응답이 없으면 timeoutMs 뒤 중단', async () => {
+// AbortSignal.timeout의 타이머는 이벤트 루프를 붙잡지 않는다(unref). 응답 없는 mock만
+// 남으면 Node가 타이머가 울리기 전에 "할 일 없음"으로 판단해 테스트를 취소한다
+// (Linux CI에서 재현). 실제 실행에선 소켓이 루프를 붙잡으므로 테스트에만 필요하다.
+const keepAlive = fn => async () => {
+  const timer = setInterval(() => {}, 1000);
+  try { await fn(); } finally { clearInterval(timer); }
+};
+
+test('fetchText: 응답이 없으면 timeoutMs 뒤 중단', keepAlive(async () => {
   const started = Date.now();
   await assert.rejects(() => fetchText('slow', 'https://slow.example/a', { fetchImpl: hangs, timeoutMs: 30 }), /요청 실패/);
   assert.ok(Date.now() - started < 2000);
-});
+}));
 
-test('fetchText: 본문을 질질 끌어도 timeoutMs 뒤 중단', async () => {
+test('fetchText: 본문을 질질 끌어도 timeoutMs 뒤 중단', keepAlive(async () => {
   // 헤더는 바로 오지만 본문 스트림이 끝나지 않는 서버
   const trickle = (_url, { signal }) => Promise.resolve({
     ok: true, status: 200, statusText: 'OK', headers: new Headers(),
@@ -239,4 +247,4 @@ test('fetchText: 본문을 질질 끌어도 timeoutMs 뒤 중단', async () => {
     }),
   });
   await assert.rejects(() => fetchText('slow', 'https://slow.example/b', { fetchImpl: trickle, timeoutMs: 30 }), /응답 수신이 30ms를 넘겨 중단/);
-});
+}));

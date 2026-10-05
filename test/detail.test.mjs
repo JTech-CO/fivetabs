@@ -144,6 +144,25 @@ test('전문 생성 중 번역 콜 실패 → 전부 null + detailError', withKe
   assert.match(d.detailError, /API 오류 429/);
 }));
 
+test('전문 번역만 잘려도 요약·블로그는 살린다', withKey(async () => {
+  // 회귀: 두 콜을 한 try로 묶어 번역이 maxTokens에서 잘리면 요약·블로그까지 버렸다
+  const cut = { ok: true, status: 200, async json() { return { stop_reason: 'max_tokens', content: [] }; } };
+  const fetchImpl = routedFetch({
+    articleHtml: ARTICLE,
+    llmResponses: [cut, llmRes({ summary: '핵심 요약', blog: '# 블로그' })],
+  });
+  const d = await generateDetail(enItem, { fetchImpl });
+  assert.equal(d.translation, null);
+  assert.equal(d.summary, '핵심 요약');
+  assert.equal(d.blog, '# 블로그');
+  assert.match(d.detailError, /^번역: .*잘렸습니다/);
+
+  const { stats } = await generateDetailsAll([enItem], {
+    fetchImpl: routedFetch({ articleHtml: ARTICLE, llmResponses: [cut, llmRes({ summary: 'S', blog: 'B' })] }),
+  });
+  assert.deepEqual({ generated: stats.generated, failed: stats.failed }, { generated: 1, failed: 0 });
+}));
+
 test('generateDetailsAll: detail* 부착 + 통계(fullText 카운트)', withKey(async () => {
   const fetchImpl = routedFetch({
     articleHtml: ARTICLE,
